@@ -1,0 +1,60 @@
+# Буфер платёжных вебхуков: HTTP-шлюз + Redis + n8n (эпизод 38, webhook_buffer)
+# Запуск: скопируйте .env.example в .env, замените WEBHOOK_TOKEN, затем: docker compose up -d --build
+# HTTPS для вебхуков (платёжные сервисы требуют https): docker compose --profile https up -d --build
+#   нужны домен с A-записью на IP этого VPS и открытые порты 80 и 443.
+# Интерфейс n8n и Redis наружу НЕ публикуются: n8n доступен только с самого сервера (ssh -L 5678:127.0.0.1:5678 user@сервер).
+services:
+  gateway:
+    build: ./gateway
+    restart: unless-stopped
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      QUEUE_KEY: webhooks:in
+      WEBHOOK_TOKEN: ${WEBHOOK_TOKEN:-}
+    depends_on:
+      - redis
+    ports:
+      - "127.0.0.1:8080:8080"            # для проверки с самого сервера; наружу идёт через Caddy (профиль https)
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]   # журнал AOF: очередь переживает перезапуск
+    volumes:
+      - redis-data:/data                 # здесь очередь и журнал AOF: делайте копию (правило 3-2-1)
+
+  n8n:
+    image: n8nio/n8n:latest              # после первого успешного запуска закрепите конкретную версию
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Europe/Moscow}
+      GENERIC_TIMEZONE: ${TZ:-Europe/Moscow}
+    ports:
+      - "127.0.0.1:5678:5678"
+    volumes:
+      - n8n-data:/home/node/.n8n
+    depends_on:
+      - redis
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    profiles: ["https"]
+    depends_on:
+      - gateway
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?Укажите DOMAIN в файле .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  redis-data:
+  n8n-data:
+  caddy-data:
+  caddy-config:

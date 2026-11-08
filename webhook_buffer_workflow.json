@@ -1,0 +1,491 @@
+{
+  "name": "Буфер платёжных вебхуков: безопасная вычитка очереди Redis (эп. 38)",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Буфер платёжных вебхуков (эпизод 38)\n1. Создайте учётные данные Redis: хост redis, порт 6379.\n2. В узле «Отдать заказ вашей системе» замените адрес на свой обработчик.\n3. Запустите вручную (в очереди должно быть что-то: см. Инструкция.txt), затем включите сценарий.\nОчередь: webhooks:in, ошибки: webhooks:dead. Каждые 30 с сценарий выбирает очередь по одной оплате с паузой 0,3 с.",
+        "height": 240,
+        "width": 520
+      },
+      "id": "w-note",
+      "name": "Памятка",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -200,
+        -240
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "seconds",
+              "secondsInterval": 30
+            }
+          ]
+        }
+      },
+      "id": "w-trigger",
+      "name": "Каждые 30 секунд",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "pop",
+        "list": "webhooks:in",
+        "tail": true,
+        "propertyName": "item"
+      },
+      "id": "w-pop",
+      "name": "Достать оплату из очереди",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        240,
+        160
+      ],
+      "credentials": {
+        "redis": {
+          "id": "",
+          "name": "Redis (контейнер redis)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.item }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "w-has",
+      "name": "Есть оплата?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        480,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Разбор конверта из очереди (его кладёт шлюз) и идентификатор платежа для проверки дубля\nconst env = JSON.parse($json.item);\nlet body = null;\ntry { body = JSON.parse(env.body); } catch (e) { body = null; }\nlet id = env.id;                       // запасной вариант: идентификатор конверта\nif (env.provider === 'stripe' && body && body.id) id = 'stripe:' + body.id;\nelse if (env.provider === 'yookassa' && body && body.object && body.object.id) id = 'yookassa:' + (body.event || '') + ':' + body.object.id;\nelse if (env.provider === 'robokassa') {\n  const m = /(?:^|&)InvId=([^&]+)/.exec(env.body || '');\n  if (m) id = 'robokassa:' + decodeURIComponent(m[1]);\n}\nreturn { json: { env, event_id: id, payload: body !== null ? body : { raw: env.body } } };"
+      },
+      "id": "w-parse",
+      "name": "Разбор вебхука",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        160
+      ],
+      "notes": "Why Code: разбор конверта шлюза (JSON внутри JSON) и выбор идентификатора платежа по провайдеру."
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "key": "={{ 'seen:' + $json.event_id }}",
+        "propertyName": "seen",
+        "keyType": "string"
+      },
+      "id": "w-seen",
+      "name": "Уже обработан?",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        960,
+        160
+      ],
+      "credentials": {
+        "redis": {
+          "id": "",
+          "name": "Redis (контейнер redis)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.seen }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "w-dup",
+      "name": "Дубль?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1200,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://example.com/api/payments/webhook",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Webhook-Provider",
+              "value": "={{ $('Разбор вебхука').item.json.env.provider }}"
+            },
+            {
+              "name": "X-Webhook-Event-Id",
+              "value": "={{ $('Разбор вебхука').item.json.event_id }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($('Разбор вебхука').item.json.payload) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "w-http",
+      "name": "Отдать заказ вашей системе",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1440,
+        260
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "={{ 'seen:' + $('Разбор вебхука').item.json.event_id }}",
+        "value": "1",
+        "keyType": "string",
+        "expire": true,
+        "ttl": 604800
+      },
+      "id": "w-mark",
+      "name": "Отметить обработанным",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        1680,
+        220
+      ],
+      "credentials": {
+        "redis": {
+          "id": "",
+          "name": "Redis (контейнер redis)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Ошибка отдачи заказа вашей системе: увеличиваем счётчик попыток; после 5 попыток вебхук уходит в список webhooks:dead\nconst src = $('Разбор вебхука').item.json.env;\nconst attempts = (Number(src.attempts) || 0) + 1;\nconst next = { ...src, attempts };\nreturn { json: { next: JSON.stringify(next), dead: attempts > 5 } };"
+      },
+      "id": "w-retry",
+      "name": "Счётчик попыток",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        420
+      ],
+      "notes": "Why Code: пересборка конверта с увеличенным счётчиком попыток."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.dead }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "w-dead",
+      "name": "Попыток больше 5?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1920,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "push",
+        "list": "webhooks:dead",
+        "messageData": "={{ $json.next }}",
+        "tail": false
+      },
+      "id": "w-pushdead",
+      "name": "В список ошибок webhooks:dead",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        2160,
+        340
+      ],
+      "credentials": {
+        "redis": {
+          "id": "",
+          "name": "Redis (контейнер redis)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "push",
+        "list": "webhooks:in",
+        "messageData": "={{ $json.next }}",
+        "tail": true
+      },
+      "id": "w-back",
+      "name": "Вернуть в очередь и остановиться",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        2160,
+        520
+      ],
+      "credentials": {
+        "redis": {
+          "id": "",
+          "name": "Redis (контейнер redis)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 0.3,
+        "unit": "seconds"
+      },
+      "id": "w-wait",
+      "name": "Пауза 0,3 с",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2400,
+        160
+      ],
+      "webhookId": "00000000-0000-0000-0000-000000000038"
+    }
+  ],
+  "connections": {
+    "Каждые 30 секунд": {
+      "main": [
+        [
+          {
+            "node": "Достать оплату из очереди",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Достать оплату из очереди": {
+      "main": [
+        [
+          {
+            "node": "Есть оплата?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Есть оплата?": {
+      "main": [
+        [
+          {
+            "node": "Разбор вебхука",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Разбор вебхука": {
+      "main": [
+        [
+          {
+            "node": "Уже обработан?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Уже обработан?": {
+      "main": [
+        [
+          {
+            "node": "Дубль?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Дубль?": {
+      "main": [
+        [
+          {
+            "node": "Пауза 0,3 с",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Отдать заказ вашей системе",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Отдать заказ вашей системе": {
+      "main": [
+        [
+          {
+            "node": "Отметить обработанным",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Счётчик попыток",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Отметить обработанным": {
+      "main": [
+        [
+          {
+            "node": "Пауза 0,3 с",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Счётчик попыток": {
+      "main": [
+        [
+          {
+            "node": "Попыток больше 5?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Попыток больше 5?": {
+      "main": [
+        [
+          {
+            "node": "В список ошибок webhooks:dead",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Вернуть в очередь и остановиться",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "В список ошибок webhooks:dead": {
+      "main": [
+        [
+          {
+            "node": "Пауза 0,3 с",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Пауза 0,3 с": {
+      "main": [
+        [
+          {
+            "node": "Достать оплату из очереди",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false
+}

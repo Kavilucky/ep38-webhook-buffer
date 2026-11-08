@@ -1,0 +1,10 @@
+# Caddy сам получает сертификат HTTPS; наружу отдаются только вебхуки и проверка здоровья
+{$DOMAIN} {
+	@hooks path /hook/* /health
+	handle @hooks {
+		reverse_proxy gateway:8080
+	}
+	handle {
+		respond "not found" 404
+	}
+}
